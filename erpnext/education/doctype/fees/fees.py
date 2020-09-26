@@ -82,7 +82,7 @@ class Fees(AccountsController):
 
 	def on_cancel(self):
 		self.ignore_linked_doctypes = ('GL Entry', 'Stock Ledger Entry')
-		make_reverse_gl_entries(voucher_type=self.doctype, voucher_no=self.name, cancel=True)
+		make_reverse_gl_entries(voucher_type=self.doctype, voucher_no=self.name)
 		# frappe.db.set(self, 'status', 'Cancelled')
 
 
@@ -98,14 +98,16 @@ class Fees(AccountsController):
 			"debit_in_account_currency": self.grand_total,
 			"against_voucher": self.name,
 			"against_voucher_type": self.doctype
-		})
+		}, item=self)
+
 		fee_gl_entry = self.get_gl_dict({
 			"account": self.income_account,
 			"against": self.student,
 			"credit": self.grand_total,
 			"credit_in_account_currency": self.grand_total,
 			"cost_center": self.cost_center
-		})
+		}, item=self)
+
 		from erpnext.accounts.general_ledger import make_gl_entries
 		make_gl_entries([student_gl_entries, fee_gl_entry], cancel=(self.docstatus == 2),
 			update_outstanding="Yes", merge_entries=False)

@@ -32,8 +32,9 @@ frappe.ui.form.on('Patient Appointment', {
 		frm.set_query('service_unit', function(){
 			return {
 				filters: {
-					'is_group': 0,
-					'allow_appointments': 1
+					'is_group': false,
+					'allow_appointments': true,
+					'company': frm.doc.company
 				}
 			};
 		});
@@ -127,6 +128,11 @@ frappe.ui.form.on('Patient Appointment', {
 	patient: function(frm) {
 		if (frm.doc.patient) {
 			frm.trigger('toggle_payment_fields');
+		} else {
+			frm.set_value('patient_name', '');
+			frm.set_value('patient_sex', '');
+			frm.set_value('patient_age', '');
+			frm.set_value('inpatient_record', '');
 		}
 	},
 
@@ -220,7 +226,9 @@ let check_and_set_availability = function(frm) {
 			primary_action_label: __('Book'),
 			primary_action: function() {
 				frm.set_value('appointment_time', selected_slot);
-				frm.set_value('duration', duration);
+				if (!frm.doc.duration) {
+					frm.set_value('duration', duration);
+				}
 				frm.set_value('practitioner', d.get_value('practitioner'));
 				frm.set_value('department', d.get_value('department'));
 				frm.set_value('appointment_date', d.get_value('appointment_date'));
@@ -230,7 +238,6 @@ let check_and_set_availability = function(frm) {
 				d.hide();
 				frm.enable_save();
 				frm.save();
-				frm.enable_save();
 				d.get_primary_btn().attr('disabled', true);
 			}
 		});
@@ -481,6 +488,7 @@ let create_vital_signs = function(frm) {
 	frappe.route_options = {
 		'patient': frm.doc.patient,
 		'appointment': frm.doc.name,
+		'company': frm.doc.company
 	};
 	frappe.new_doc('Vital Signs');
 };
@@ -513,6 +521,7 @@ frappe.ui.form.on('Patient Appointment', 'practitioner', function(frm) {
 			callback: function (data) {
 				frappe.model.set_value(frm.doctype, frm.docname, 'department', data.message.department);
 				frappe.model.set_value(frm.doctype, frm.docname, 'paid_amount', data.message.op_consulting_charge);
+				frappe.model.set_value(frm.doctype, frm.docname, 'billing_item', data.message.op_consulting_charge_item);
 			}
 		});
 	}

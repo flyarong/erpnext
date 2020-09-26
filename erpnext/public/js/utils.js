@@ -191,6 +191,23 @@ $.extend(erpnext.utils, {
 		})
 	},
 
+	add_dimensions: function(report_name, index) {
+		let filters = frappe.query_reports[report_name].filters;
+
+		erpnext.dimension_filters.forEach((dimension) => {
+			let found = filters.some(el => el.fieldname === dimension['fieldname']);
+
+			if (!found) {
+				filters.splice(index, 0 ,{
+					"fieldname": dimension["fieldname"],
+					"label": __(dimension["label"]),
+					"fieldtype": "Link",
+					"options": dimension["document_type"]
+				});
+			}
+		});
+	},
+
 	make_subscription: function(doctype, docname) {
 		frappe.call({
 			method: "frappe.automation.doctype.auto_repeat.auto_repeat.make_auto_repeat",
@@ -450,6 +467,33 @@ erpnext.utils.update_child_items = function(opts) {
 		disabled: 0,
 		label: __('Item Code')
 	}, {
+		fieldtype:'Link',
+		fieldname:'uom',
+		options: 'UOM',
+		read_only: 0,
+		label: __('UOM'),
+		reqd: 1,
+		onchange: function () {
+			frappe.call({
+				method: "erpnext.stock.get_item_details.get_conversion_factor",
+				args: { item_code: this.doc.item_code, uom: this.value },
+				callback: r => {
+					if(!r.exc) {
+						if (this.doc.conversion_factor == r.message.conversion_factor) return;
+						
+						const docname = this.doc.docname;
+						dialog.fields_dict.trans_items.df.data.some(doc => {
+							if (doc.docname == docname) {
+								doc.conversion_factor = r.message.conversion_factor;
+								dialog.fields_dict.trans_items.grid.refresh();
+								return true;
+							}
+						})
+					}
+				}
+			});
+		}
+	}, {
 		fieldtype:'Float',
 		fieldname:"qty",
 		default: 0,
@@ -470,7 +514,14 @@ erpnext.utils.update_child_items = function(opts) {
 			fieldtype: 'Date',
 			fieldname: frm.doc.doctype == 'Sales Order' ? "delivery_date" : "schedule_date",
 			in_list_view: 1,
-			label: frm.doc.doctype == 'Sales Order' ? __("Delivery Date") : __("Reqd by date")
+			label: frm.doc.doctype == 'Sales Order' ? __("Delivery Date") : __("Reqd by date"),
+			reqd: 1
+		})
+		fields.splice(3, 0, {
+			fieldtype: 'Float',
+			fieldname: "conversion_factor",
+			in_list_view: 1,
+			label: __("Conversion Factor")
 		})
 	}
 
@@ -519,8 +570,10 @@ erpnext.utils.update_child_items = function(opts) {
 			"item_code": d.item_code,
 			"delivery_date": d.delivery_date,
 			"schedule_date": d.schedule_date,
+			"conversion_factor": d.conversion_factor,
 			"qty": d.qty,
 			"rate": d.rate,
+			"uom": d.uom
 		});
 		this.data = dialog.fields_dict.trans_items.df.data;
 		dialog.fields_dict.trans_items.grid.refresh();

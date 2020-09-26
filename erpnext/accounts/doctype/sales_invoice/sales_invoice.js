@@ -96,6 +96,12 @@ erpnext.accounts.SalesInvoiceController = erpnext.selling.SellingController.exte
 				cur_frm.add_custom_button(__('Invoice Discounting'), function() {
 					cur_frm.events.create_invoice_discounting(cur_frm);
 				}, __('Create'));
+
+				if (doc.due_date < frappe.datetime.get_today()) {
+					cur_frm.add_custom_button(__('Dunning'), function() {
+						cur_frm.events.create_dunning(cur_frm);
+					}, __('Create'));
+				}
 			}
 
 			if (doc.docstatus === 1) {
@@ -276,7 +282,7 @@ erpnext.accounts.SalesInvoiceController = erpnext.selling.SellingController.exte
 					"customer": this.frm.doc.customer
 				},
 				callback: function(r) {
-					if(r.message && r.message.length) {
+					if(r.message && r.message.length > 1) {
 						select_loyalty_program(me.frm, r.message);
 					}
 				}
@@ -824,6 +830,12 @@ frappe.ui.form.on('Sales Invoice', {
 			method: "erpnext.accounts.doctype.sales_invoice.sales_invoice.create_invoice_discounting",
 			frm: frm
 		});
+	},
+	create_dunning: function(frm) {
+		frappe.model.open_mapped_doc({
+			method: "erpnext.accounts.doctype.sales_invoice.sales_invoice.create_dunning",
+			frm: frm
+		});
 	}
 })
 
@@ -924,7 +936,7 @@ var get_healthcare_services_to_invoice = function(frm) {
 		if(patient && patient!=selected_patient){
 			selected_patient = patient;
 			var method = "erpnext.healthcare.utils.get_healthcare_services_to_invoice";
-			var args = {patient: patient};
+			var args = {patient: patient, company: frm.doc.company};
 			var columns = (["service", "reference_name", "reference_type"]);
 			get_healthcare_items(frm, true, $results, $placeholder, method, args, columns);
 		}
@@ -1068,7 +1080,11 @@ var get_drugs_to_invoice = function(frm) {
 				description:'Quantity will be calculated only for items which has "Nos" as UoM. You may change as required for each invoice item.',
 				get_query: function(doc) {
 					return {
-						filters: { patient: dialog.get_value("patient"), docstatus: 1 }
+						filters: { 
+							patient: dialog.get_value("patient"),
+							company: frm.doc.company,
+							docstatus: 1
+						}
 					};
 				}
 			},

@@ -69,7 +69,7 @@ class PaymentRequest(Document):
 		elif self.payment_request_type == 'Inward':
 			self.db_set('status', 'Requested')
 
-		send_mail = self.payment_gateway_validation()
+		send_mail = self.payment_gateway_validation() if self.payment_gateway else None
 		ref_doc = frappe.get_doc(self.reference_doctype, self.reference_name)
 
 		if (hasattr(ref_doc, "order_type") and getattr(ref_doc, "order_type") == "Shopping Cart") \
@@ -140,9 +140,6 @@ class PaymentRequest(Document):
 		})
 
 	def set_as_paid(self):
-		if frappe.session.user == "Guest":
-			frappe.set_user("Administrator")
-
 		payment_entry = self.create_payment_entry()
 		self.make_invoice()
 
@@ -254,7 +251,7 @@ class PaymentRequest(Document):
 
 		if status in ["Authorized", "Completed"]:
 			redirect_to = None
-			self.run_method("set_as_paid")
+			self.set_as_paid()
 
 			# if shopping cart enabled and in session
 			if (shopping_cart_settings.enabled and hasattr(frappe.local, "session")

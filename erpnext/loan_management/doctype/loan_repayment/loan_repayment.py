@@ -6,13 +6,14 @@ from __future__ import unicode_literals
 import frappe, erpnext
 import json
 from frappe import _
-from frappe.utils import flt, getdate
+from frappe.utils import flt, getdate, cint
 from six import iteritems
 from frappe.model.document import Document
 from frappe.utils import date_diff, add_days, getdate, add_months, get_first_day, get_datetime
 from erpnext.controllers.accounts_controller import AccountsController
 from erpnext.accounts.general_ledger import make_gl_entries
 from erpnext.loan_management.doctype.loan_security_shortfall.loan_security_shortfall import update_shortfall_status
+from erpnext.loan_management.doctype.process_loan_interest_accrual.process_loan_interest_accrual import process_loan_interest_accrual_for_demand_loans
 
 class LoanRepayment(AccountsController):
 
@@ -22,6 +23,9 @@ class LoanRepayment(AccountsController):
 		self.validate_amount()
 		self.allocate_amounts(amounts['pending_accrual_entries'])
 
+	def before_submit(self):
+		self.book_unaccrued_interest()
+
 	def on_submit(self):
 		self.update_paid_amount()
 		self.make_gl_entries()
@@ -29,8 +33,11 @@ class LoanRepayment(AccountsController):
 	def on_cancel(self):
 		self.mark_as_unpaid()
 		self.make_gl_entries(cancel=1)
+		self.ignore_linked_doctypes = ['GL Entry']
 
 	def set_missing_values(self, amounts):
+		precision = cint(frappe.db.get_default("currency_precision")) or 2
+
 		if not self.posting_date:
 			self.posting_date = get_datetime()
 
@@ -38,24 +45,26 @@ class LoanRepayment(AccountsController):
 			self.cost_center = erpnext.get_default_cost_center(self.company)
 
 		if not self.interest_payable:
-			self.interest_payable = flt(amounts['interest_amount'], 2)
+			self.interest_payable = flt(amounts['interest_amount'], precision)
 
 		if not self.penalty_amount:
-			self.penalty_amount = flt(amounts['penalty_amount'], 2)
+			self.penalty_amount = flt(amounts['penalty_amount'], precision)
 
 		if not self.pending_principal_amount:
-			self.pending_principal_amount = flt(amounts['pending_principal_amount'], 2)
+			self.pending_principal_amount = flt(amounts['pending_principal_amount'], precision)
 
 		if not self.payable_principal_amount and self.is_term_loan:
-			self.payable_principal_amount = flt(amounts['payable_principal_amount'], 2)
+			self.payable_principal_amount = flt(amounts['payable_principal_amount'], precision)
 
 		if not self.payable_amount:
-			self.payable_amount = flt(amounts['payable_amount'], 2)
+			self.payable_amount = flt(amounts['payable_amount'], precision)
 
 		if amounts.get('due_date'):
 			self.due_date = amounts.get('due_date')
 
 	def validate_amount(self):
+		precision = cint(frappe.db.get_default("currency_precision")) or 2
+
 		if not self.amount_paid:
 			frappe.throw(_("Amount paid cannot be zero"))
 
@@ -63,11 +72,33 @@ class LoanRepayment(AccountsController):
 			msg = _("Paid amount cannot be less than {0}").format(self.penalty_amount)
 			frappe.throw(msg)
 
-		if self.payment_type == "Loan Closure" and flt(self.amount_paid, 2) < flt(self.payable_amount, 2):
+		if self.payment_type == "Loan Closure" and flt(self.amount_paid, precision) < flt(self.payable_amount, precision):
 			msg = _("Amount of {0} is required for Loan closure").format(self.payable_amount)
 			frappe.throw(msg)
 
+	def book_unaccrued_interest(self):
+		if self.payment_type == 'Loan Closure':
+			total_interest_paid = 0
+			for payment in self.repayment_details:
+				total_interest_paid += payment.paid_interest_amount
+
+			if total_interest_paid < self.interest_payable:
+				if not self.is_term_loan:
+					process = process_loan_interest_accrual_for_demand_loans(posting_date=self.posting_date,
+						loan=self.against_loan)
+
+					lia = frappe.db.get_value('Loan Interest Accrual', {'process_loan_interest_accrual':
+						process}, ['name', 'interest_amount', 'payable_principal_amount'], as_dict=1)
+
+					self.append('repayment_details', {
+						'loan_interest_accrual': lia.name,
+						'paid_interest_amount': lia.interest_amount,
+						'paid_principal_amount': lia.payable_principal_amount
+					})
+
 	def update_paid_amount(self):
+		precision = cint(frappe.db.get_default("currency_precision")) or 2
+
 		loan = frappe.get_doc("Loan", self.against_loan)
 
 		for payment in self.repayment_details:
@@ -75,10 +106,13 @@ class LoanRepayment(AccountsController):
 				SET paid_principal_amount = `paid_principal_amount` + %s,
 					paid_interest_amount = `paid_interest_amount` + %s
 				WHERE name = %s""",
-				(flt(payment.paid_principal_amount), flt(payment.paid_interest_amount), payment.loan_interest_accrual))
+				(flt(payment.paid_principal_amount, precision), flt(payment.paid_interest_amount, precision), payment.loan_interest_accrual))
 
-		if flt(loan.total_principal_paid + self.principal_amount_paid, 2) >= flt(loan.total_payment, 2):
-			frappe.db.set_value("Loan", self.against_loan, "status", "Loan Closure Requested")
+		if flt(loan.total_principal_paid + self.principal_amount_paid, precision) >= flt(loan.total_payment, precision):
+			if loan.is_secured_loan:
+				frappe.db.set_value("Loan", self.against_loan, "status", "Loan Closure Requested")
+			else:
+				frappe.db.set_value("Loan", self.against_loan, "status", "Closed")
 
 		frappe.db.sql(""" UPDATE `tabLoan` SET total_amount_paid = %s, total_principal_paid = %s
 			WHERE name = %s """, (loan.total_amount_paid + self.amount_paid,
@@ -106,7 +140,8 @@ class LoanRepayment(AccountsController):
 	def allocate_amounts(self, paid_entries):
 		self.set('repayment_details', [])
 		self.principal_amount_paid = 0
-		interest_paid = 0
+		total_interest_paid = 0
+		interest_paid = self.amount_paid - self.penalty_amount
 
 		if self.amount_paid - self.penalty_amount > 0 and paid_entries:
 			interest_paid = self.amount_paid - self.penalty_amount
@@ -127,11 +162,16 @@ class LoanRepayment(AccountsController):
 						interest_paid = 0
 						paid_principal=0
 
+				total_interest_paid += interest_amount
 				self.append('repayment_details', {
 					'loan_interest_accrual': lia,
 					'paid_interest_amount': interest_amount,
 					'paid_principal_amount': paid_principal
 				})
+
+		if self.payment_type == 'Loan Closure' and total_interest_paid < self.interest_payable:
+			unaccrued_interest = self.interest_payable - total_interest_paid
+			interest_paid -= unaccrued_interest
 
 		if interest_paid:
 			self.principal_amount_paid += interest_paid
@@ -250,6 +290,7 @@ def get_accrued_interest_entries(against_loan):
 # So it pulls all the unpaid Loan Interest Accrual Entries and calculates the penalty if applicable
 
 def get_amounts(amounts, against_loan, posting_date, payment_type):
+	precision = cint(frappe.db.get_default("currency_precision")) or 2
 
 	against_loan_doc = frappe.get_doc("Loan", against_loan)
 	loan_type_details = frappe.get_doc("Loan Type", against_loan_doc.loan_type)
@@ -261,6 +302,7 @@ def get_amounts(amounts, against_loan, posting_date, payment_type):
 	penalty_amount = 0
 	payable_principal_amount = 0
 	final_due_date = ''
+	due_date = ''
 
 	for entry in accrued_interest_entries:
 		# Loan repayment due date is one day after the loan interest is accrued
@@ -269,7 +311,7 @@ def get_amounts(amounts, against_loan, posting_date, payment_type):
 
 		due_date = add_days(entry.posting_date, 1)
 		no_of_late_days = date_diff(posting_date,
-					add_days(due_date, loan_type_details.grace_period_in_days)) + 1
+			add_days(due_date, loan_type_details.grace_period_in_days))
 
 		if no_of_late_days > 0 and (not against_loan_doc.repay_from_salary):
 			penalty_amount += (entry.interest_amount * (loan_type_details.penalty_interest_rate / 100) * no_of_late_days)/365
@@ -278,17 +320,21 @@ def get_amounts(amounts, against_loan, posting_date, payment_type):
 		payable_principal_amount += entry.payable_principal_amount
 
 		pending_accrual_entries.setdefault(entry.name, {
-			'interest_amount': flt(entry.interest_amount),
-			'payable_principal_amount': flt(entry.payable_principal_amount)
+			'interest_amount': flt(entry.interest_amount, precision),
+			'payable_principal_amount': flt(entry.payable_principal_amount, precision)
 		})
 
-		final_due_date = due_date
+		if not final_due_date:
+			final_due_date = add_days(due_date, loan_type_details.grace_period_in_days)
 
-	pending_principal_amount = against_loan_doc.total_payment - against_loan_doc.total_principal_paid - against_loan_doc.total_interest_payable
+	if against_loan_doc.status in ('Disbursed', 'Loan Closure Requested', 'Closed'):
+		pending_principal_amount = against_loan_doc.total_payment - against_loan_doc.total_principal_paid - against_loan_doc.total_interest_payable
+	else:
+		pending_principal_amount = against_loan_doc.disbursed_amount
 
-	if payment_type == "Loan Closure" and not payable_principal_amount:
-		if final_due_date:
-			pending_days = date_diff(posting_date, final_due_date)
+	if payment_type == "Loan Closure":
+		if due_date:
+			pending_days = date_diff(posting_date, due_date) + 1
 		else:
 			pending_days = date_diff(posting_date, against_loan_doc.disbursement_date) + 1
 
@@ -296,11 +342,11 @@ def get_amounts(amounts, against_loan, posting_date, payment_type):
 		per_day_interest = (payable_principal_amount * (loan_type_details.rate_of_interest / 100))/365
 		total_pending_interest += (pending_days * per_day_interest)
 
-	amounts["pending_principal_amount"] = pending_principal_amount
-	amounts["payable_principal_amount"] = payable_principal_amount
-	amounts["interest_amount"] = total_pending_interest
-	amounts["penalty_amount"] = penalty_amount
-	amounts["payable_amount"] = payable_principal_amount + total_pending_interest + penalty_amount
+	amounts["pending_principal_amount"] = flt(pending_principal_amount, precision)
+	amounts["payable_principal_amount"] = flt(payable_principal_amount, precision)
+	amounts["interest_amount"] = flt(total_pending_interest, precision)
+	amounts["penalty_amount"] = flt(penalty_amount, precision)
+	amounts["payable_amount"] = flt(payable_principal_amount + total_pending_interest + penalty_amount, precision)
 	amounts["pending_accrual_entries"] = pending_accrual_entries
 
 	if final_due_date:

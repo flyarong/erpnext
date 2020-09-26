@@ -73,6 +73,8 @@ erpnext.buying.BuyingController = erpnext.TransactionController.extend({
 		me.frm.set_query('contact_person', erpnext.queries.contact_query);
 		me.frm.set_query('supplier_address', erpnext.queries.address_query);
 
+		me.frm.set_query('billing_address', erpnext.queries.company_address_query);
+
 		if(this.frm.fields_dict.supplier) {
 			this.frm.set_query("supplier", function() {
 				return{	query: "erpnext.controllers.queries.supplier_query" }});
@@ -253,6 +255,13 @@ erpnext.buying.BuyingController = erpnext.TransactionController.extend({
 		}
 	},
 
+	rejected_warehouse: function(doc, cdt) {
+		// trigger autofill_warehouse only if parent rejected_warehouse field is triggered
+		if (["Purchase Invoice", "Purchase Receipt"].includes(cdt)) {
+			this.autofill_warehouse(doc.items, "rejected_warehouse", doc.rejected_warehouse);
+		}
+	},
+
 	category: function(doc, cdt, cdn) {
 		// should be the category field of tax table
 		if(cdt != doc.doctype) {
@@ -274,6 +283,11 @@ erpnext.buying.BuyingController = erpnext.TransactionController.extend({
 		var me = this;
 		erpnext.utils.get_address_display(this.frm, "shipping_address",
 			"shipping_address_display", true);
+	},
+
+	billing_address: function() {
+		erpnext.utils.get_address_display(this.frm, "billing_address",
+			"billing_address_display", true);
 	},
 
 	tc_name: function() {
@@ -489,11 +503,11 @@ erpnext.buying.get_items_from_product_bundle = function(frm) {
 
 					if(!r.exc && r.message) {
 						remove_empty_first_row(frm);
-						for ( var i=0; i< r.message.length; i++ ) {
+						for (var i=0; i< r.message.length; i++) {
 							var d = frm.add_child("items");
 							var item = r.message[i];
-							for ( var key in  item) {
-								if ( !is_null(item[key]) ) {
+							for (var key in  item) {
+								if (!is_null(item[key]) && key !== "doctype") {
 									d[key] = item[key];
 								}
 							}

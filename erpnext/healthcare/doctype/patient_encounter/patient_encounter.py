@@ -10,6 +10,9 @@ from frappe.utils import cstr
 from frappe import _
 
 class PatientEncounter(Document):
+	def validate(self):
+		self.set_title()
+
 	def on_update(self):
 		if self.appointment:
 			frappe.db.set_value('Patient Appointment', self.appointment, 'status', 'Closed')
@@ -28,6 +31,10 @@ class PatientEncounter(Document):
 
 	def on_submit(self):
 		create_therapy_plan(self)
+
+	def set_title(self):
+		self.title = _('{0} with {1}').format(self.patient_name or self.patient,
+			self.practitioner_name or self.practitioner)[:100]
 
 def create_therapy_plan(encounter):
 	if len(encounter.therapies):
@@ -66,7 +73,7 @@ def update_encounter_medical_record(encounter):
 		insert_encounter_to_medical_record(encounter)
 
 def delete_medical_record(encounter):
-	frappe.db.delete_doc_if_exists('Patient Medical Record', 'reference_name', encounter.name)
+	frappe.delete_doc_if_exists('Patient Medical Record', 'reference_name', encounter.name)
 
 def set_subject_field(encounter):
 	subject = frappe.bold(_('Healthcare Practitioner: ')) + encounter.practitioner + '<br>'
