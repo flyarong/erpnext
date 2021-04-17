@@ -13,6 +13,7 @@
   "stop_birthday_reminders",
   "expense_approver_mandatory_in_expense_claim",
   "leave_settings",
+  "send_leave_notification",
   "leave_approval_notification_template",
   "leave_status_notification_template",
   "role_allowed_to_create_backdated_leave_application",
@@ -21,6 +22,7 @@
   "show_leaves_of_all_department_members_in_calendar",
   "auto_leave_encashment",
   "restrict_backdated_leave_application",
+  "automatically_allocate_leaves_based_on_leave_policy",
   "hiring_settings",
   "check_vacancies"
  ],
@@ -41,7 +43,7 @@
    "description": "Employee records are created using the selected field",
    "fieldname": "emp_created_by",
    "fieldtype": "Select",
-   "label": "Employee Records to Be Created By",
+   "label": "Employee Records to be created by",
    "options": "Naming Series\nEmployee Number\nFull Name"
   },
   {
@@ -68,15 +70,19 @@
    "label": "Leave Settings"
   },
   {
+   "depends_on": "eval: doc.send_leave_notification == 1",
    "fieldname": "leave_approval_notification_template",
    "fieldtype": "Link",
    "label": "Leave Approval Notification Template",
+   "mandatory_depends_on": "eval: doc.send_leave_notification == 1",
    "options": "Email Template"
   },
   {
+   "depends_on": "eval: doc.send_leave_notification == 1",
    "fieldname": "leave_status_notification_template",
    "fieldtype": "Link",
    "label": "Leave Status Notification Template",
+   "mandatory_depends_on": "eval: doc.send_leave_notification == 1",
    "options": "Email Template"
   },
   {
@@ -117,7 +123,7 @@
    "default": "0",
    "fieldname": "restrict_backdated_leave_application",
    "fieldtype": "Check",
-   "label": "Restrict Backdated Leave Applications"
+   "label": "Restrict Backdated Leave Application"
   },
   {
    "depends_on": "eval:doc.restrict_backdated_leave_application == 1",
@@ -125,13 +131,25 @@
    "fieldtype": "Link",
    "label": "Role Allowed to Create Backdated Leave Application",
    "options": "Role"
+  },
+  {
+   "default": "0",
+   "fieldname": "automatically_allocate_leaves_based_on_leave_policy",
+   "fieldtype": "Check",
+   "label": "Automatically Allocate Leaves Based On Leave Policy"
+  },
+  {
+   "default": "1",
+   "fieldname": "send_leave_notification",
+   "fieldtype": "Check",
+   "label": "Send Leave Notification"
   }
  ],
  "icon": "fa fa-cog",
  "idx": 1,
  "issingle": 1,
  "links": [],
- "modified": "2020-10-13 11:49:46.168027",
+ "modified": "2021-03-14 02:04:22.907159",
  "modified_by": "Administrator",
  "module": "HR",
  "name": "HR Settings",
@@ -148,5 +166,6 @@
   }
  ],
  "sort_field": "modified",
- "sort_order": "ASC"
+ "sort_order": "ASC",
+ "track_changes": 1
 }

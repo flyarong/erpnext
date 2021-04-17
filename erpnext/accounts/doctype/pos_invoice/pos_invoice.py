@@ -6,10 +6,9 @@ from __future__ import unicode_literals
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from erpnext.controllers.selling_controller import SellingController
-from frappe.utils import cint, flt, add_months, today, date_diff, getdate, add_days, cstr, nowdate
 from erpnext.accounts.utils import get_account_currency
 from erpnext.accounts.party import get_party_account, get_due_date
+from frappe.utils import cint, flt, getdate, nowdate, get_link_to_form
 from erpnext.accounts.doctype.payment_request.payment_request import make_payment_request
 from erpnext.accounts.doctype.loyalty_program.loyalty_program import validate_loyalty_points
 from erpnext.stock.doctype.serial_no.serial_no import get_pos_reserved_serial_nos, get_serial_nos
@@ -39,6 +38,7 @@ class POSInvoice(SalesInvoice):
 		self.validate_serialised_or_batched_item()
 		self.validate_stock_availablility()
 		self.validate_return_items_qty()
+		self.validate_non_stock_items()
 		self.set_status()
 		self.set_account_for_mode_of_payment()
 		self.validate_pos()
@@ -57,6 +57,22 @@ class POSInvoice(SalesInvoice):
 			self.apply_loyalty_points()
 		self.check_phone_payments()
 		self.set_status(update=True)
+
+	def before_cancel(self):
+		if self.consolidated_invoice and frappe.db.get_value('Sales Invoice', self.consolidated_invoice, 'docstatus') == 1:
+			pos_closing_entry = frappe.get_all(
+				"POS Invoice Reference",
+				ignore_permissions=True,
+				filters={ 'pos_invoice': self.name },
+				pluck="parent",
+				limit=1
+			)
+			frappe.throw(
+				_('You need to cancel POS Closing Entry {} to be able to cancel this document.').format(
+					get_link_to_form("POS Closing Entry", pos_closing_entry[0])
+				),
+				title=_('Not Allowed')
+			)
 
 	def on_cancel(self):
 		# run on cancel method of selling controller
@@ -77,7 +93,7 @@ class POSInvoice(SalesInvoice):
 						mode_of_payment=pay.mode_of_payment, status="Paid"),
 					fieldname="grand_total")
 
-				if pay.amount != paid_amt:
+				if paid_amt and pay.amount != paid_amt:
 					return frappe.throw(_("Payment related to {0} is not completed").format(pay.mode_of_payment))
 
 	def validate_stock_availablility(self):
@@ -92,7 +108,6 @@ class POSInvoice(SalesInvoice):
 				filters = { "item_code": d.item_code, "warehouse": d.warehouse }
 				if d.batch_no:
 					filters["batch_no"] = d.batch_no
-
 				reserved_serial_nos = get_pos_reserved_serial_nos(filters)
 				serial_nos = get_serial_nos(d.serial_no)
 				invalid_serial_nos = [s for s in serial_nos if s in reserved_serial_nos]
@@ -132,15 +147,19 @@ class POSInvoice(SalesInvoice):
 
 			msg = ""
 			item_code = frappe.bold(d.item_code)
+			serial_nos = get_serial_nos(d.serial_no)
 			if serialized and batched and (no_batch_selected or no_serial_selected):
 				msg = (_('Row #{}: Please select a serial no and batch against item: {} or remove it to complete transaction.')
 							.format(d.idx, item_code))
-			if serialized and no_serial_selected:
+			elif serialized and no_serial_selected:
 				msg = (_('Row #{}: No serial number selected against item: {}. Please select one or remove it to complete transaction.')
 							.format(d.idx, item_code))
-			if batched and no_batch_selected:
+			elif batched and no_batch_selected:
 				msg = (_('Row #{}: No batch selected against item: {}. Please select a batch or remove it to complete transaction.')
 							.format(d.idx, item_code))
+			elif serialized and not no_serial_selected and len(serial_nos) != d.qty:
+				msg = (_("Row #{}: You must select {} serial numbers for item {}.").format(d.idx, frappe.bold(cint(d.qty)), item_code))
+
 			if msg:
 				error_msg.append(msg)
 
@@ -159,10 +178,18 @@ class POSInvoice(SalesInvoice):
 			if d.get("serial_no"):
 				serial_nos = get_serial_nos(d.serial_no)
 				for sr in serial_nos:
-					serial_no_exists = frappe.db.exists("POS Invoice Item", {
-						"parent": self.return_against, 
-						"serial_no": ["like", d.get("serial_no")]
-					})
+					serial_no_exists = frappe.db.sql("""
+						SELECT name
+						FROM `tabPOS Invoice Item`
+						WHERE
+							parent = %s
+							and (serial_no = %s
+								or serial_no like %s
+								or serial_no like %s
+								or serial_no like %s
+							)
+					""", (self.return_against, sr, sr+'\n%', '%\n'+sr, '%\n'+sr+'\n%'))
+
 					if not serial_no_exists:
 						bold_return_against = frappe.bold(self.return_against)
 						bold_serial_no = frappe.bold(sr)
@@ -170,6 +197,14 @@ class POSInvoice(SalesInvoice):
 							_("Row #{}: Serial No {} cannot be returned since it was not transacted in original invoice {}")
 							.format(d.idx, bold_serial_no, bold_return_against)
 						)
+
+	def validate_non_stock_items(self):
+		for d in self.get("items"):
+			is_stock_item = frappe.get_cached_value("Item", d.get("item_code"), "is_stock_item")
+			if not is_stock_item:
+				frappe.throw(_("Row #{}: Item {} is a non stock item. You can only include stock items in a POS Invoice. ").format(
+					d.idx, frappe.bold(d.item_code)
+				), title=_("Invalid Item"))
 
 	def validate_mode_of_payment(self):
 		if len(self.payments) == 0:
@@ -185,7 +220,7 @@ class POSInvoice(SalesInvoice):
 		base_grand_total = flt(self.base_rounded_total) or flt(self.base_grand_total)
 		if not flt(self.change_amount) and grand_total < flt(self.paid_amount):
 			self.change_amount = flt(self.paid_amount - grand_total + flt(self.write_off_amount))
-			self.base_change_amount = flt(self.base_paid_amount - base_grand_total + flt(self.base_write_off_amount))
+			self.base_change_amount = flt(self.base_paid_amount) - base_grand_total + flt(self.base_write_off_amount)
 
 		if flt(self.change_amount) and not self.account_for_change_amount:
 			frappe.msgprint(_("Please enter Account for Change Amount"), raise_exception=1)
@@ -254,6 +289,8 @@ class POSInvoice(SalesInvoice):
 		from erpnext.stock.get_item_details import get_pos_profile_item_details, get_pos_profile
 		if not self.pos_profile:
 			pos_profile = get_pos_profile(self.company) or {}
+			if not pos_profile:
+				frappe.throw(_("No POS Profile found. Please create a New POS Profile first"))
 			self.pos_profile = pos_profile.get('name')
 
 		profile = {}
@@ -262,7 +299,7 @@ class POSInvoice(SalesInvoice):
 
 		if not self.get('payments') and not for_validate:
 			update_multi_mode_option(self, profile)
-		
+
 		if self.is_return and not for_validate:
 			add_return_modes(self, profile)
 
@@ -282,9 +319,14 @@ class POSInvoice(SalesInvoice):
 						self.set(fieldname, profile.get(fieldname))
 
 			if self.customer:
-				customer_price_list, customer_group = frappe.db.get_value("Customer", self.customer, ['default_price_list', 'customer_group'])
+				customer_price_list, customer_group, customer_currency = frappe.db.get_value(
+					"Customer", self.customer, ['default_price_list', 'customer_group', 'default_currency']
+				)
 				customer_group_price_list = frappe.db.get_value("Customer Group", customer_group, 'default_price_list')
 				selling_price_list = customer_price_list or customer_group_price_list or profile.get('selling_price_list')
+				if customer_currency != profile.get('currency'):
+					self.set('currency', customer_currency)
+
 			else:
 				selling_price_list = profile.get('selling_price_list')
 
@@ -312,6 +354,7 @@ class POSInvoice(SalesInvoice):
 
 		return profile
 
+	@frappe.whitelist()
 	def set_missing_values(self, for_validate=False):
 		profile = self.set_pos_fields(for_validate)
 
@@ -334,12 +377,20 @@ class POSInvoice(SalesInvoice):
 				"allow_print_before_pay": profile.get("allow_print_before_pay")
 			}
 
+	@frappe.whitelist()
+	def reset_mode_of_payments(self):
+		if self.pos_profile:
+			pos_profile = frappe.get_cached_doc('POS Profile', self.pos_profile)
+			update_multi_mode_option(self, pos_profile)
+			self.paid_amount = 0
+
 	def set_account_for_mode_of_payment(self):
 		self.payments = [d for d in self.payments if d.amount or d.base_amount or d.default]
 		for pay in self.payments:
 			if not pay.account:
 				pay.account = get_bank_cash_account(pay.mode_of_payment, self.company).get("account")
 
+	@frappe.whitelist()
 	def create_payment_request(self):
 		for pay in self.payments:
 			if pay.type == "Phone":
@@ -349,22 +400,48 @@ class POSInvoice(SalesInvoice):
 				if not self.contact_mobile:
 					frappe.throw(_("Please enter the phone number first"))
 
-				payment_gateway = frappe.db.get_value("Payment Gateway Account", {
-					"payment_account": pay.account,
-				})
-				record = {
-					"payment_gateway": payment_gateway,
-					"dt": "POS Invoice",
-					"dn": self.name,
-					"payment_request_type": "Inward",
-					"party_type": "Customer",
-					"party": self.customer,
-					"mode_of_payment": pay.mode_of_payment,
-					"recipient_id": self.contact_mobile,
-					"submit_doc": True
-				}
+				pay_req = self.get_existing_payment_request(pay)
+				if not pay_req:
+					pay_req = self.get_new_payment_request(pay)
+					pay_req.submit()
+				else:
+					pay_req.request_phone_payment()
 
-				return make_payment_request(**record)
+				return pay_req
+
+	def get_new_payment_request(self, mop):
+		payment_gateway_account = frappe.db.get_value("Payment Gateway Account", {
+			"payment_account": mop.account,
+		}, ["name"])
+
+		args = {
+			"dt": "POS Invoice",
+			"dn": self.name,
+			"recipient_id": self.contact_mobile,
+			"mode_of_payment": mop.mode_of_payment,
+			"payment_gateway_account": payment_gateway_account,
+			"payment_request_type": "Inward",
+			"party_type": "Customer",
+			"party": self.customer,
+			"return_doc": True
+		}
+		return make_payment_request(**args)
+
+	def get_existing_payment_request(self, pay):
+		payment_gateway_account = frappe.db.get_value("Payment Gateway Account", {
+			"payment_account": pay.account,
+		}, ["name"])
+
+		args = {
+			'doctype': 'Payment Request',
+			'reference_doctype': 'POS Invoice',
+			'reference_name': self.name,
+			'payment_gateway_account': payment_gateway_account,
+			'email_to': self.contact_mobile
+		}
+		pr = frappe.db.exists(args)
+		if pr:
+			return frappe.get_doc('Payment Request', pr[0][0])
 
 @frappe.whitelist()
 def get_stock_availability(item_code, warehouse):

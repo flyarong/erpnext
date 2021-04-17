@@ -160,6 +160,8 @@ class ReceivablePayableReport(object):
 			else:
 				# advance / unlinked payment or other adjustment
 				row.paid -= gle_balance
+		if gle.cost_center:
+			row.cost_center =  str(gle.cost_center)
 
 	def update_sub_total_row(self, row, party):
 		total_row = self.total_row_map.get(party)
@@ -210,7 +212,6 @@ class ReceivablePayableReport(object):
 		for key, row in self.voucher_balance.items():
 			row.outstanding = flt(row.invoiced - row.paid - row.credit_note, self.currency_precision)
 			row.invoice_grand_total = row.invoiced
-
 			if abs(row.outstanding) > 1.0/10 ** self.currency_precision:
 				# non-zero oustanding, we must consider this row
 
@@ -363,7 +364,7 @@ class ReceivablePayableReport(object):
 		payment_terms_details = frappe.db.sql("""
 			select
 				si.name, si.party_account_currency, si.currency, si.conversion_rate,
-				ps.due_date, ps.payment_amount, ps.description, ps.paid_amount
+				ps.due_date, ps.payment_amount, ps.description, ps.paid_amount, ps.discounted_amount
 			from `tab{0}` si, `tabPayment Schedule` ps
 			where
 				si.name = ps.parent and
@@ -394,13 +395,13 @@ class ReceivablePayableReport(object):
 			"invoiced": invoiced,
 			"invoice_grand_total": row.invoiced,
 			"payment_term": d.description,
-			"paid": d.paid_amount,
+			"paid": d.paid_amount + d.discounted_amount,
 			"credit_note": 0.0,
-			"outstanding": invoiced - d.paid_amount
+			"outstanding": invoiced - d.paid_amount - d.discounted_amount
 		}))
 
 		if d.paid_amount:
-			row['paid'] -= d.paid_amount
+			row['paid'] -= d.paid_amount + d.discounted_amount
 
 	def allocate_closing_to_term(self, row, term, key):
 		if row[key]:
@@ -577,7 +578,7 @@ class ReceivablePayableReport(object):
 
 		self.gl_entries = frappe.db.sql("""
 			select
-				name, posting_date, account, party_type, party, voucher_type, voucher_no,
+				name, posting_date, account, party_type, party, voucher_type, voucher_no, cost_center,
 				against_voucher_type, against_voucher, account_currency, remarks, {0}
 			from
 				`tabGL Entry`
@@ -741,6 +742,7 @@ class ReceivablePayableReport(object):
 			self.add_column(_("Customer Contact"), fieldname='customer_primary_contact',
 				fieldtype='Link', options='Contact')
 
+		self.add_column(label=_('Cost Center'), fieldname='cost_center', fieldtype='Data')
 		self.add_column(label=_('Voucher Type'), fieldname='voucher_type', fieldtype='Data')
 		self.add_column(label=_('Voucher No'), fieldname='voucher_no', fieldtype='Dynamic Link',
 			options='voucher_type', width=180)

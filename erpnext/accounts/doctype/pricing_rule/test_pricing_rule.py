@@ -56,6 +56,7 @@ class TestPricingRule(unittest.TestCase):
 		self.assertEqual(details.get("discount_percentage"), 10)
 
 		prule = frappe.get_doc(test_record.copy())
+		prule.priority = 1
 		prule.applicable_for = "Customer"
 		prule.title = "_Test Pricing Rule for Customer"
 		self.assertRaises(MandatoryError, prule.insert)
@@ -261,6 +262,7 @@ class TestPricingRule(unittest.TestCase):
 			"rate_or_discount": "Discount Percentage",
 			"rate": 0,
 			"discount_percentage": 17.5,
+			"priority": 1,
 			"company": "_Test Company"
 		}).insert()
 
@@ -323,6 +325,21 @@ class TestPricingRule(unittest.TestCase):
 		self.assertEquals(item.margin_rate_or_amount, 10)
 		self.assertEquals(item.rate_with_margin, 1100)
 		self.assertEqual(item.discount_percentage, 10)
+		self.assertEquals(item.discount_amount, 110)
+		self.assertEquals(item.rate, 990)
+
+	def test_pricing_rule_with_margin_and_discount_amount(self):
+		frappe.delete_doc_if_exists('Pricing Rule', '_Test Pricing Rule')
+		make_pricing_rule(selling=1, margin_type="Percentage", margin_rate_or_amount=10,
+			rate_or_discount="Discount Amount", discount_amount=110)
+		si = create_sales_invoice(do_not_save=True)
+		si.items[0].price_list_rate = 1000
+		si.payment_schedule = []
+		si.insert(ignore_permissions=True)
+
+		item = si.items[0]
+		self.assertEquals(item.margin_rate_or_amount, 10)
+		self.assertEquals(item.rate_with_margin, 1100)
 		self.assertEquals(item.discount_amount, 110)
 		self.assertEquals(item.rate, 990)
 
@@ -484,6 +501,59 @@ class TestPricingRule(unittest.TestCase):
 		frappe.delete_doc_if_exists("Pricing Rule", "_Test Pricing Rule 1")
 		frappe.delete_doc_if_exists("Pricing Rule", "_Test Pricing Rule 2")
 
+	def test_item_price_with_pricing_rule(self):
+		item = make_item("Water Flask")
+		make_item_price("Water Flask", "_Test Price List", 100)
+
+		pricing_rule_record = {
+			"doctype": "Pricing Rule",
+			"title": "_Test Water Flask Rule",
+			"apply_on": "Item Code",
+			"items": [{
+				"item_code": "Water Flask",
+			}],
+			"selling": 1,
+			"currency": "INR",
+			"rate_or_discount": "Rate",
+			"rate": 0,
+			"margin_type": "Percentage",
+			"margin_rate_or_amount": 2,
+			"company": "_Test Company"
+		}
+		rule = frappe.get_doc(pricing_rule_record)
+		rule.insert()
+
+		si = create_sales_invoice(do_not_save=True, item_code="Water Flask")
+		si.selling_price_list = "_Test Price List"
+		si.save()
+
+		# If rate in Rule is 0, give preference to Item Price if it exists
+		self.assertEqual(si.items[0].price_list_rate, 100)
+		self.assertEqual(si.items[0].margin_rate_or_amount, 2)
+		self.assertEqual(si.items[0].rate_with_margin, 102)
+		self.assertEqual(si.items[0].rate, 102)
+
+		si.delete()
+		rule.delete()
+		frappe.get_doc("Item Price", {"item_code": "Water Flask"}).delete()
+		item.delete()
+
+	def test_pricing_rule_for_transaction(self):
+		make_item("Water Flask 1")
+		frappe.delete_doc_if_exists('Pricing Rule', '_Test Pricing Rule')
+		make_pricing_rule(selling=1, min_qty=5, price_or_product_discount="Product",
+			apply_on="Transaction", free_item="Water Flask 1", free_qty=1, free_item_rate=10)
+
+		si = create_sales_invoice(qty=5, do_not_submit=True)
+		self.assertEquals(len(si.items), 2)
+		self.assertEquals(si.items[1].rate, 10)
+
+		si1 = create_sales_invoice(qty=2, do_not_submit=True)
+		self.assertEquals(len(si1.items), 1)
+
+		for doc in [si, si1]:
+			doc.delete()
+
 def make_pricing_rule(**args):
 	args = frappe._dict(args)
 
@@ -502,20 +572,25 @@ def make_pricing_rule(**args):
 		"rate_or_discount": args.rate_or_discount or "Discount Percentage",
 		"discount_percentage": args.discount_percentage or 0.0,
 		"rate": args.rate or 0.0,
-		"margin_type": args.margin_type,
 		"margin_rate_or_amount": args.margin_rate_or_amount or 0.0,
 		"condition": args.condition or '',
+		"priority": 1,
+		"discount_amount": args.discount_amount or 0.0,
 		"apply_multiple_pricing_rules": args.apply_multiple_pricing_rules or 0
 	})
 
-	if args.get("priority"):
-		doc.priority = args.get("priority")
+	for field in ["free_item", "free_qty", "free_item_rate", "priority",
+		"margin_type", "price_or_product_discount"]:
+		if args.get(field):
+			doc.set(field, args.get(field))
 
 	apply_on = doc.apply_on.replace(' ', '_').lower()
 	child_table = {'Item Code': 'items', 'Item Group': 'item_groups', 'Brand': 'brands'}
-	doc.append(child_table.get(doc.apply_on), {
-		apply_on: args.get(apply_on) or "_Test Item"
-	})
+
+	if doc.apply_on != "Transaction":
+		doc.append(child_table.get(doc.apply_on), {
+			apply_on: args.get(apply_on) or "_Test Item"
+		})
 
 	doc.insert(ignore_permissions=True)
 	if args.get(apply_on) and apply_on != "item_code":
